@@ -79,8 +79,9 @@ def update_fn_be(
     plot_grad_norm_name_fn: Optional[Callable[[str], bool]],
     plot_grads_nan_inf: bool,
     max_grad_norm_global: Optional[float],
-    frozen_vars_patterns: Optional[Sequence[str]],
-    fast_weight_lr_multiplier: float):
+    fast_weight_lr_multiplier: float,
+    ens_size: int,
+    batch_size: int):
   """Updates a model on the given inputs for one step.
 
   Args:
@@ -102,10 +103,10 @@ def update_fn_be(
       gradients allowed for before clipping. If the norm is larger than this,
       the gradients are scaled to have this norm. Use None to avoid any norm
       clipping.
-    frozen_vars_patterns: List of regex patterns corresponding to variables
-      which should be removed from gradients.
     fast_weight_lr_multiplier: the ratio of the fast weights LR to the slow
       weights one.
+    ens_size: Ensemble size.
+    batch_size: Total batch size.
 
   Returns:
     The optimizer with the updated parameters and state.
@@ -116,19 +117,13 @@ def update_fn_be(
 
   # If rng is provided: split rng, and return next_rng for the following step.
   rngs, next_rngs = core.tree_rngs_split(rngs, num_splits=2)
-  (loss, aux), grads = jax.value_and_grad(
+  (loss, logits), grads = jax.value_and_grad(
       batch_loss_fn, has_aux=True)(opt.target, images, labels, rngs=rngs)
 
-  # Average gradients.
   grads = jax.lax.pmean(grads, axis_name='batch')
-
-  # TODO(basilm, jpuigcerver): Find better ways to freeze/clip gradients.
-  if frozen_vars_patterns:
-    regexes = [re.compile(ptn) for ptn in frozen_vars_patterns]
-    match_fn = lambda name: any([regex.search(name) for regex in regexes])
-    grads = core.tree_map_with_names(jnp.zeros_like, grads, match_fn)
-
   loss = jax.lax.pmean(loss, axis_name='batch')
+  aux = {}
+  aux['training_loss'] = loss
 
   if plot_grads_nan_inf:
     # If you think that this is heavily affecting your training speed, use
@@ -163,4 +158,14 @@ def update_fn_be(
   if weight_decay_fn:
     params = weight_decay_fn(opt.target, lr)
     opt = opt.replace(target=params)
-  return opt, next_rngs, loss, aux
+
+  # Compute accuracy using individual member predictions to save compute.
+  top1_idx = jnp.argmax(logits, axis=1)
+  tiled_labels = jnp.tile(labels, (ens_size, 1))
+  top1_correct = jnp.take_along_axis(tiled_labels,
+                                     top1_idx[:, None], axis=1)[:, 0]
+  prec1 = jax.lax.psum(jnp.sum(top1_correct), axis_name='batch') / (
+      batch_size * ens_size)
+  aux['training_prec@1'] = prec1
+  aux['learning_rate'] = lr
+  return opt, next_rngs, aux
