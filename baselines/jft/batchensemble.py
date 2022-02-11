@@ -379,31 +379,7 @@ def main(_):
   # device as the input is, in this case the CPU. Else they'd be on device[0].
   opt_cpu = jax.jit(opt_def.create)(params_cpu)
 
-  weight_decay_rules = config.get('weight_decay', []) or []
-  rescale_value = config.lr.base if config.get('weight_decay_decouple') else 1.
-  weight_decay_fn = train_utils.get_weight_decay_fn(
-      weight_decay_rules=weight_decay_rules, rescale_value=rescale_value)
-
-  def batch_loss_fn(params, images, labels, rngs):
-    logits, _ = model.apply(
-        {'params': flax.core.freeze(params)}, images,
-        train=True, rngs=rngs)
-    labels = jnp.tile(labels, (ens_size, 1))
-    loss_fn = getattr(train_utils, config.get('loss', 'sigmoid_xent'))
-    loss = jnp.mean(loss_fn(logits=logits, labels=labels))
-    return loss, dict()
-
-  @functools.partial(jax.pmap, axis_name='batch', donate_argnums=(0, 1))
-  def update_fn(opt, rngs, lr, images, labels):
-    return batchensemble_utils.update_fn_be(
-        opt=opt, rngs=rngs, lr=lr, images=images, labels=labels,
-        batch_loss_fn=batch_loss_fn,
-        weight_decay_fn=weight_decay_fn,
-        plot_grad_norm_name_fn=None,
-        plot_grads_nan_inf=config.get('plot_grads_nan_inf', True),
-        max_grad_norm_global=config.get('grad_clip_norm', None),
-        frozen_vars_patterns=config.get('frozen_var_patterns', None),
-        fast_weight_lr_multiplier=config.get('fast_weight_lr_multiplier', None))
+  update_fn = batchensemble_utils.make_update_fn(model, config)
 
   reint_params = ('batchensemble_head/bias',
                   'batchensemble_head/kernel',
@@ -487,10 +463,10 @@ def main(_):
       if not config.get('only_eval', False):
         opt_repl, train_loop_rngs, loss_value, extra_measurements = update_fn(
             opt_repl,
-            train_loop_rngs,
             lr_repl,
             train_batch['image'],
-            train_batch['labels'])
+            train_batch['labels'],
+            train_loop_rngs)
 
     if jax.process_index() == 0:
       profiler(step)
