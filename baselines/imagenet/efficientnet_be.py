@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 The Uncertainty Baselines Authors.
+# Copyright 2021 The Uncertainty Baselines Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -124,7 +124,8 @@ def main(argv):
   test_iterator = iter(test_datasets['clean'])
 
   if FLAGS.use_bfloat16:
-    tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+    policy = tf.keras.mixed_precision.experimental.Policy('mixed_bfloat16')
+    tf.keras.mixed_precision.experimental.set_policy(policy)
 
   summary_writer = tf.summary.create_file_writer(
       os.path.join(FLAGS.output_dir, 'summaries'))
@@ -335,6 +336,10 @@ def main(argv):
         checkpoint_name = checkpoint.save(os.path.join(
             FLAGS.output_dir, 'checkpoint'))
         logging.info('Saved checkpoint to %s', checkpoint_name)
+
+  final_save_name = os.path.join(FLAGS.output_dir, 'model')
+  model.save(final_save_name)
+  logging.info('Saved model to %s', final_save_name)
   with summary_writer.as_default():
     hp.hparams({
         'base_learning_rate': FLAGS.base_learning_rate,
